@@ -107,30 +107,39 @@ abstract class AbstractIndex(@volatile private var _file: File, val baseOffset: 
 
   @volatile
   protected var mmap: MappedByteBuffer = {
+    // 1. 创建索引文件
     val newlyCreated = file.createNewFile()
+    // 2. 以writable 指定的方式(读写|只读)打开索引文件
     val raf = if (writable) new RandomAccessFile(file, "rw") else new RandomAccessFile(file, "r")
     try {
       /* pre-allocate the file if necessary */
       if(newlyCreated) {
+       //预计索引文件不能太小, 如果连一个索引项都没有, 抛出异常.
         if(maxIndexSize < entrySize)
           throw new IllegalArgumentException("Invalid max index size: " + maxIndexSize)
+        // 3.设置索引文件长度，roundDownToExactMultiple计算的是不超过maxIndexSize的最大整数倍entrySize
+        // example: 如果 maxIndexSize = 1234567， entrySize = 8,那么调整后的文件长度为 1234560
         raf.setLength(roundDownToExactMultiple(maxIndexSize, entrySize))
       }
-
+      // 4. 更新索引长度字段
       /* memory-map the file */
       _length = raf.length()
+      // 5. 创建 MappedByteBuffer 对象
       val idx = {
         if (writable)
           raf.getChannel.map(FileChannel.MapMode.READ_WRITE, 0, _length)
         else
           raf.getChannel.map(FileChannel.MapMode.READ_ONLY, 0, _length)
       }
+      // 6. 如果是新创建的索引文件, 将 MappedByteBuffer 对象当前位置置为0.
+      // 如果索引文件已存在, 将MappedByteBuffer 对象当前位置设置成最后一个索引项所在位置.
       /* set the position in the index for the next entry */
       if(newlyCreated)
         idx.position(0)
       else
         // if this is a pre-existing index, assume it is valid and set position to last entry
         idx.position(roundDownToExactMultiple(idx.limit(), entrySize))
+      // 返回创建的 MappedByteBuffer 对象.
       idx
     } finally {
       CoreUtils.swallow(raf.close(), AbstractIndex)
@@ -295,6 +304,7 @@ abstract class AbstractIndex(@volatile private var _file: File, val baseOffset: 
    */
   def relativeOffset(offset: Long): Int = {
     val relativeOffset = toRelative(offset)
+    // 抛出 整形越界异常.
     if (relativeOffset.isEmpty)
       throw new IndexOffsetOverflowException(s"Integer overflow for offset: $offset (${file.getAbsoluteFile})")
     relativeOffset.get
@@ -343,6 +353,7 @@ abstract class AbstractIndex(@volatile private var _file: File, val baseOffset: 
 
   /**
    * To parse an entry in the index.
+   * 在二分查找算法中被调用.
    *
    * @param buffer the buffer of this memory mapped index.
    * @param n the slot
@@ -372,9 +383,11 @@ abstract class AbstractIndex(@volatile private var _file: File, val baseOffset: 
    */
   private def indexSlotRangeFor(idx: ByteBuffer, target: Long, searchEntity: IndexSearchType): (Int, Int) = {
     // check if the index is empty
+    // 1. 如果 索引为空, 返回 <-1,-1>
     if(_entries == 0)
       return (-1, -1)
 
+    // 2. 封装原版的 二分查找.
     def binarySearch(begin: Int, end: Int) : (Int, Int) = {
       // binary search for the entry
       var lo = begin
@@ -393,16 +406,23 @@ abstract class AbstractIndex(@volatile private var _file: File, val baseOffset: 
       (lo, if (lo == _entries - 1) -1 else lo + 1)
     }
 
+    // 3. 确认首个索引项位于那个槽, _warmEntries 就是所谓的分割线. 默认为8192
+    // 如果是OffsetIndex, _warmEntries = 8192 / 8 = 1024 个槽
+    // 如果是TimeIndex,   _warmEntries = 8192 / 12 = 682 个槽
     val firstHotEntry = Math.max(0, _entries - 1 - _warmEntries)
+    // 4. 判断 target是否在 热区,
     // check if the target offset is in the warm section of the index
     if(compareIndexEntry(parseEntry(idx, firstHotEntry), target, searchEntity) < 0) {
+      // 搜索热区.
       return binarySearch(firstHotEntry, _entries - 1)
     }
 
+    // 5. 确保target 位移值 不能小于当前最小位移值
     // check if the target offset is smaller than the least offset
     if(compareIndexEntry(parseEntry(idx, 0), target, searchEntity) > 0)
       return (-1, 0)
 
+    // 6. 如果在冷区, 搜索冷区
     binarySearch(0, firstHotEntry)
   }
 

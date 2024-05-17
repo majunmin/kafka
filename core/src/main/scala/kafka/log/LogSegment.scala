@@ -53,12 +53,12 @@ import scala.math._
  */
 @nonthreadsafe
 class LogSegment private[log] (val log: FileRecords,
-                               val lazyOffsetIndex: LazyIndex[OffsetIndex],
-                               val lazyTimeIndex: LazyIndex[TimeIndex],
-                               val txnIndex: TransactionIndex,
+                               val lazyOffsetIndex: LazyIndex[OffsetIndex], //  对应索引文件
+                               val lazyTimeIndex: LazyIndex[TimeIndex], //  对应索引文件
+                               val txnIndex: TransactionIndex, // 对应索引文件
                                val baseOffset: Long,
-                               val indexIntervalBytes: Int,
-                               val rollJitterMs: Long,
+                               val indexIntervalBytes: Int, // log.index.interval.bytes
+                               val rollJitterMs: Long, // 日志段新增倒计时的扰动值
                                val time: Time) extends Logging {
 
   def offsetIndex: OffsetIndex = lazyOffsetIndex.get
@@ -144,6 +144,7 @@ class LogSegment private[log] (val log: FileRecords,
              largestTimestamp: Long,
              shallowOffsetOfMaxTimestamp: Long,
              records: MemoryRecords): Unit = {
+    // 1. 判断该日志段是否为空,
     if (records.sizeInBytes > 0) {
       trace(s"Inserting ${records.sizeInBytes} bytes at end offset $largestOffset at position ${log.sizeInBytes} " +
             s"with largest timestamp $largestTimestamp at shallow offset $shallowOffsetOfMaxTimestamp")
@@ -151,16 +152,21 @@ class LogSegment private[log] (val log: FileRecords,
       if (physicalPosition == 0)
         rollingBasedTimestamp = Some(largestTimestamp)
 
+      // 2. 保证输入参数的最大位移值是合法的.
       ensureOffsetInRange(largestOffset)
 
+      // 3. 真正的写入， 调用 FileRecord.append(), 写入页缓存.
       // append the messages
       val appendedBytes = log.append(records)
       trace(s"Appended $appendedBytes to ${log.file} at end offset $largestOffset")
+      // 4. 更新日志段的最大时间戳 和 位移属性, 每个日志段都需要保存最大时间戳信息和所属消息的位移信息.
+      // Broker 定期删除日志的功能是怎么实现的?
       // Update the in memory max timestamp and corresponding offset.
       if (largestTimestamp > maxTimestampSoFar) {
         maxTimestampSoFar = largestTimestamp
         offsetOfMaxTimestampSoFar = shallowOffsetOfMaxTimestamp
       }
+      // 5. 更新索引项 和 写入的字节数. 日志段每写入4kb数据就要写入一个索引项.
       // append an entry to the index (if needed)
       if (bytesSinceLastIndexEntry > indexIntervalBytes) {
         offsetIndex.append(largestOffset, physicalPosition)
@@ -294,6 +300,7 @@ class LogSegment private[log] (val log: FileRecords,
     if (maxSize < 0)
       throw new IllegalArgumentException(s"Invalid max size $maxSize for log read from segment $log")
 
+    // 1. 确认要读取的文件的起始位置, startOffset 仅仅是位移值, 需要转换为物理文件的位置.
     val startOffsetAndSize = translateOffset(startOffset)
 
     // if the start position is already off the end of the log, return null
@@ -314,6 +321,7 @@ class LogSegment private[log] (val log: FileRecords,
     // calculate the length of the message set to read based on whether or not they gave us a maxOffset
     val fetchSize: Int = min((maxPosition - startPosition).toInt, adjustedMaxSize)
 
+    // 3. 调用FileRecords.slice() 从指定位置读取指定大小的消息.
     FetchDataInfo(offsetMetadata, log.slice(startPosition, fetchSize),
       firstEntryIncomplete = adjustedMaxSize < startOffsetAndSize.size)
   }
