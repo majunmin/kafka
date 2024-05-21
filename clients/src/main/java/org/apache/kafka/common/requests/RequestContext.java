@@ -34,12 +34,15 @@ import java.util.Optional;
 import static org.apache.kafka.common.protocol.ApiKeys.API_VERSIONS;
 
 public class RequestContext implements AuthorizableRequestContext {
+    // Request 头部数据, 主要是针对用户不可见的一些元数据(requestType, apiVersion, clientID...)
     public final RequestHeader header;
+    // Request 发送放的链接标志. 由 kafka 根据一定的规则定义, 标志一个TCP 连接.
     public final String connectionId;
     public final InetAddress clientAddress;
     public final KafkaPrincipal principal;
     public final ListenerName listenerName;
     public final SecurityProtocol securityProtocol;
+    // 用户自定义的一些连接方信息.
     public final ClientInformation clientInformation;
     public final boolean fromPrivilegedListener;
     public final Optional<KafkaPrincipalSerde> principalSerde;
@@ -83,8 +86,14 @@ public class RequestContext implements AuthorizableRequestContext {
         this.principalSerde = principalSerde;
     }
 
+    /**
+     * 主要从 ByteBuffer 中 解析出  Request 对象, 以及它的大小.
+     * @param buffer
+     * @return
+     */
     public RequestAndSize parseRequest(ByteBuffer buffer) {
         if (isUnsupportedApiVersionsRequest()) {
+            // 不支持的请求类型 被视为 v0, 不做解析, 直接返回.
             // Unsupported ApiVersion requests are treated as v0 requests and are not parsed
             ApiVersionsRequest apiVersionsRequest = new ApiVersionsRequest(new ApiVersionsRequestData(), (short) 0, header.apiVersion());
             return new RequestAndSize(apiVersionsRequest, 0);
@@ -94,6 +103,7 @@ public class RequestContext implements AuthorizableRequestContext {
                 short apiVersion = header.apiVersion();
                 return AbstractRequest.parseRequest(apiKey, apiVersion, buffer);
             } catch (Throwable ex) {
+                // 解析过程中出现任何异常都是为无效请求, 抛出异常.
                 throw new InvalidRequestException("Error getting request for apiKey: " + apiKey +
                         ", apiVersion: " + header.apiVersion() +
                         ", connectionId: " + connectionId +

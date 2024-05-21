@@ -92,19 +92,19 @@ import kafka.server.metadata.ConfigRepository
 /**
  * Logic to handle the various Kafka requests
  */
-class KafkaApis(val requestChannel: RequestChannel,
+class KafkaApis(val requestChannel: RequestChannel, // 请求通道,(requestQueue, processor...)
                 val metadataSupport: MetadataSupport,
-                val replicaManager: ReplicaManager,
+                val replicaManager: ReplicaManager, // 副本管理器
                 val groupCoordinator: GroupCoordinator,
                 val txnCoordinator: TransactionCoordinator,
                 val autoTopicCreationManager: AutoTopicCreationManager,
-                val brokerId: Int,
-                val config: KafkaConfig,
+                val brokerId: Int, // broker.id
+                val config: KafkaConfig, // kafka 配置类
                 val configRepository: ConfigRepository,
-                val metadataCache: MetadataCache,
+                val metadataCache: MetadataCache, // 元数据
                 val metrics: Metrics,
                 val authorizer: Option[Authorizer],
-                val quotas: QuotaManagers,
+                val quotas: QuotaManagers, // 配额管理器组件
                 val fetchManager: FetchManager,
                 brokerTopicStats: BrokerTopicStats,
                 val clusterId: String,
@@ -163,6 +163,7 @@ class KafkaApis(val requestChannel: RequestChannel,
         throw new IllegalStateException(s"API ${request.header.apiKey} is not enabled")
       }
 
+      // 根据 request.header.apiKey 判断请求类型.
       request.header.apiKey match {
         case ApiKeys.PRODUCE => handleProduceRequest(request)
         case ApiKeys.FETCH => handleFetchRequest(request)
@@ -225,7 +226,9 @@ class KafkaApis(val requestChannel: RequestChannel,
         case _ => throw new IllegalStateException(s"No handler for request api key ${request.header.apiKey}")
       }
     } catch {
+      // 如果是 严重异常, 向上抛出
       case e: FatalExitError => throw e
+      // 如果是普通异常 记录日志
       case e: Throwable => requestHelper.handleError(request, e)
     } finally {
       // try to complete delayed action. In order to avoid conflicting locking, the actions to complete delayed requests
@@ -234,7 +237,7 @@ class KafkaApis(val requestChannel: RequestChannel,
       replicaManager.tryCompleteActions()
       // The local completion time may be set while processing the request. Only record it if it's unset.
       if (request.apiLocalCompleteTimeNanos < 0)
-        request.apiLocalCompleteTimeNanos = time.nanoseconds
+        request.apiLocalCompleteTimeNanos = time.nanoseconds  // 记录请求完成的时间, broker 处理完该请求的时间.
     }
   }
 
