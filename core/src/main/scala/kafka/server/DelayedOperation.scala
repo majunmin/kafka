@@ -237,6 +237,7 @@ final class DelayedOperationPurgatory[T <: DelayedOperation](purgatoryName: Stri
     }) return true
 
     // if it cannot be completed by now and hence is watched, add to the expire queue also
+    // 如果无法完成 && isWatched, 加入到 expire 队列.
     if (!operation.isCompleted) {
       if (timerEnabled)
         timeoutTimer.add(operation)
@@ -256,8 +257,11 @@ final class DelayedOperationPurgatory[T <: DelayedOperation](purgatoryName: Stri
    * @return the number of completed operations during this process
    */
   def checkAndComplete(key: Any): Int = {
+    // 获取Key 对应的 watcherList
     val wl = watcherList(key)
+    // 获取watcherList 中key 对应的 watcher
     val watchers = inLock(wl.watchersLock) { wl.watchersByKey.get(key) }
+    // 尝试完成满足条件的延迟请求并返回成功的请求数.
     val numCompleted = if (watchers == null)
       0
     else

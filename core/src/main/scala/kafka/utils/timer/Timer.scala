@@ -56,13 +56,15 @@ class SystemTimer(executorName: String,
                   tickMs: Long = 1,
                   wheelSize: Int = 20,
                   startMs: Long = Time.SYSTEM.hiResClockMs) extends Timer {
-
+  // 单线程的线程池, 用于异步执行定时任务.
   // timeout timer
   private[this] val taskExecutor = Executors.newFixedThreadPool(1,
     (runnable: Runnable) => KafkaThread.nonDaemon("executor-" + executorName, runnable))
 
+  // 延时队列用于保存所有的Bucket, 即所有的 TimerTaskList 对象.
   private[this] val delayQueue = new DelayQueue[TimerTaskList]()
   private[this] val taskCounter = new AtomicInteger(0)
+  //时间轮对象.
   private[this] val timingWheel = new TimingWheel(
     tickMs = tickMs,
     wheelSize = wheelSize,
@@ -98,13 +100,17 @@ class SystemTimer(executorName: String,
    * waits up to timeoutMs before giving up.
    */
   def advanceClock(timeoutMs: Long): Boolean = {
+    // 获取下一个已过期的 bucket
     var bucket = delayQueue.poll(timeoutMs, TimeUnit.MILLISECONDS)
     if (bucket != null) {
       writeLock.lock()
       try {
         while (bucket != null) {
+          // 滚动时间轮到 过期的 bucket
           timingWheel.advanceClock(bucket.getExpiration)
+          // 将 bucket 下所有的定时任务重写回 时间轮.
           bucket.flush(addTimerTaskEntry)
+          // 读取下一个bucket 对象.
           bucket = delayQueue.poll()
         }
       } finally {
