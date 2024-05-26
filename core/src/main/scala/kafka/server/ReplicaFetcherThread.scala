@@ -44,14 +44,18 @@ import scala.collection.{Map, mutable}
 import scala.compat.java8.OptionConverters._
 
 class ReplicaFetcherThread(name: String,
+                           // follower 拉取的线程id
                            fetcherId: Int,
                            sourceBroker: BrokerEndPoint,
                            brokerConfig: KafkaConfig,
                            failedPartitions: FailedPartitions,
+                           // 重要， 通过它获取分区/副本对象 以及他们下面的日志对象.
                            replicaMgr: ReplicaManager,
                            metrics: Metrics,
                            time: Time,
+                            // 用于限流，
                            quota: ReplicaQuota,
+                           // 用于同步发送请求的类, 线程使用它给指定的broker发送请求, 阻塞调用.
                            leaderEndpointBlockingSend: Option[BlockingSend] = None)
   extends AbstractFetcherThread(name = name,
                                 clientId = name,
@@ -61,11 +65,13 @@ class ReplicaFetcherThread(name: String,
                                 isInterruptible = false,
                                 replicaMgr.brokerTopicStats) {
 
+  // replicaId 就是副本所在 broker 的 brokerID.
   private val replicaId = brokerConfig.brokerId
   private val logContext = new LogContext(s"[ReplicaFetcher replicaId=$replicaId, leaderId=${sourceBroker.id}, " +
     s"fetcherId=$fetcherId] ")
   this.logIdent = logContext.logPrefix
 
+  // 用于执行请求发送的类.
   private val leaderEndpoint = leaderEndpointBlockingSend.getOrElse(
     new ReplicaFetcherBlockingSend(sourceBroker, brokerConfig, metrics, time, fetcherId,
       s"broker-$replicaId-fetcher-$fetcherId", logContext))
@@ -102,9 +108,13 @@ class ReplicaFetcherThread(name: String,
     else if (brokerConfig.interBrokerProtocolVersion >= KAFKA_0_10_1_IV2) 1
     else 0
 
+  // follower 发送的 fetch 请求的超时时间.
   private val maxWait = brokerConfig.replicaFetchWaitMaxMs
+  // 每个 fetchResponse 返回前需要积累的最小字节数.
   private val minBytes = brokerConfig.replicaFetchMinBytes
+  // 每个合法的 FetchResponse 返回的最大字节数。
   private val maxBytes = brokerConfig.replicaFetchResponseMaxBytes
+  // 单个分区可以获取的最大字节数.
   private val fetchSize = brokerConfig.replicaFetchMaxBytes
   override protected val isOffsetForLeaderEpochSupported: Boolean = brokerConfig.interBrokerProtocolVersion >= KAFKA_0_11_0_IV2
   override protected val isTruncationOnFetchSupported = ApiVersion.isTruncationOnFetchSupported(brokerConfig.interBrokerProtocolVersion)
@@ -160,12 +170,16 @@ class ReplicaFetcherThread(name: String,
                                     fetchOffset: Long,
                                     partitionData: FetchData): Option[LogAppendInfo] = {
     val logTrace = isTraceEnabled
+    // 从 副本管理器 获取 主题分区对象.
     val partition = replicaMgr.getPartitionOrException(topicPartition)
+    // 获取日志对象.
     val log = partition.localLogOrException
+    // 将获取到的消息转化为 符合格式要求的 消息集合.
     val records = toMemoryRecords(partitionData.records)
 
     maybeWarnIfOversizedRecords(records, topicPartition)
 
+    // 要读取的起始位移值 如果不是本地日志LEO, 则视为异常情况.
     if (fetchOffset != log.logEndOffset)
       throw new IllegalStateException("Offset mismatch for partition %s: fetched offset = %d, log end offset = %d.".format(
         topicPartition, fetchOffset, log.logEndOffset))
@@ -174,6 +188,7 @@ class ReplicaFetcherThread(name: String,
       trace("Follower has replica log end offset %d for partition %s. Received %d messages and leader hw %d"
         .format(log.logEndOffset, topicPartition, records.sizeInBytes, partitionData.highWatermark))
 
+    // 写入 follower 副本本地日志.
     // Append the leader's messages to the log
     val logAppendInfo = partition.appendRecordsToFollowerOrFutureReplica(records, isFuture = false)
 
@@ -182,23 +197,28 @@ class ReplicaFetcherThread(name: String,
         .format(log.logEndOffset, records.sizeInBytes, topicPartition))
     val leaderLogStartOffset = partitionData.logStartOffset
 
+    // 更新follower 副本 HW.
     // For the follower replica, we do not need to keep its segment base offset and physical position.
     // These values will be computed upon becoming leader or handling a preferred read replica fetch.
     val followerHighWatermark = log.updateHighWatermark(partitionData.highWatermark)
+    // 尝试更新 follower 副本的 Log Start Offset
     log.maybeIncrementLogStartOffset(leaderLogStartOffset, LeaderOffsetIncremented)
     if (logTrace)
       trace(s"Follower set replica high watermark for partition $topicPartition to $followerHighWatermark")
 
+    // 副本消息拉取限流.
     // Traffic from both in-sync and out of sync replicas are accounted for in replication quota to ensure total replication
     // traffic doesn't exceed quota.
     if (quota.isThrottled(topicPartition))
       quota.record(records.sizeInBytes)
 
+    // 更新统计指标
     if (partition.isReassigning && partition.isAddingLocalReplica)
       brokerTopicStats.updateReassignmentBytesIn(records.sizeInBytes)
 
     brokerTopicStats.updateReplicationBytesIn(records.sizeInBytes)
 
+    // 返回日志写入结果.
     logAppendInfo
   }
 
@@ -266,6 +286,8 @@ class ReplicaFetcherThread(name: String,
     val partitionsWithError = mutable.Set[TopicPartition]()
 
     val builder = fetchSessionHandler.newBuilder(partitionMap.size, false)
+    // 遍历每个分区，对于可获取状态的分区加入到 builder, 后续统一处理.
+    // 对于出错的分区加入到 `出错分区列表`.
     partitionMap.forKeyValue { (topicPartition, fetchState) =>
       // We will not include a replica in the fetch request if it should be throttled.
       if (fetchState.isReadyForFetch && !shouldFollowerThrottle(quota, fetchState, topicPartition)) {
@@ -294,6 +316,7 @@ class ReplicaFetcherThread(name: String,
     val fetchRequestOpt = if (fetchData.sessionPartitions.isEmpty && fetchData.toForget.isEmpty) {
       None
     } else {
+      // 构造 fetch 请求的 Builder 对象.
       val requestBuilder = FetchRequest.Builder
         .forReplica(fetchRequestVersion, replicaId, maxWait, minBytes, fetchData.toSend)
         .setMaxBytes(maxBytes)
@@ -302,6 +325,7 @@ class ReplicaFetcherThread(name: String,
       Some(ReplicaFetch(fetchData.sessionPartitions(), requestBuilder))
     }
 
+    // 返回Builder 对象以及出错分区列表.
     ResultWithPartitions(fetchRequestOpt, partitionsWithError)
   }
 
@@ -310,9 +334,12 @@ class ReplicaFetcherThread(name: String,
    * The logic for finding the truncation offset is implemented in AbstractFetcherThread.getOffsetTruncationState
    */
   override def truncate(tp: TopicPartition, offsetTruncationState: OffsetTruncationState): Unit = {
+    // 拿到分区对象,
     val partition = replicaMgr.getPartitionOrException(tp)
+    // 拿到分区本地日志。
     val log = partition.localLogOrException
 
+    // 执行阶段操作, 截断的位置由 offsetTruncationState.offset 决定.
     partition.truncateTo(offsetTruncationState.offset, isFuture = false)
 
     if (offsetTruncationState.offset < log.highWatermark)

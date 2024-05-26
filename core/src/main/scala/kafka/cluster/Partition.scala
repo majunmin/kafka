@@ -940,13 +940,16 @@ class Partition(val topicPartition: TopicPartition,
   private def tryCompleteDelayedRequests(): Unit = delayedOperations.checkAndCompleteAll()
 
   def maybeShrinkIsr(): Unit = {
+    // 1. 判断是否需要执行  shrink
     val needsIsrUpdate = !isrState.isInflight && inReadLock(leaderIsrUpdateLock) {
       needsShrinkIsr()
     }
     val leaderHWIncremented = needsIsrUpdate && inWriteLock(leaderIsrUpdateLock) {
       leaderLogIfLocal.exists { leaderLog =>
+        // 2. 获取不同步的 follower  副本列表.
         val outOfSyncReplicaIds = getOutOfSyncReplicas(replicaLagTimeMaxMs)
         if (outOfSyncReplicaIds.nonEmpty) {
+          // 计算收缩之后的 ISR列表
           val outOfSyncReplicaLog = outOfSyncReplicaIds.map { replicaId =>
             s"(brokerId: $replicaId, endOffset: ${getReplicaOrException(replicaId).logEndOffset})"
           }.mkString(" ")
@@ -955,8 +958,10 @@ class Partition(val topicPartition: TopicPartition,
                s"Leader: (highWatermark: ${leaderLog.highWatermark}, endOffset: ${leaderLog.logEndOffset}). " +
                s"Out of sync replicas: $outOfSyncReplicaLog.")
 
+          // 更新Zookeeper 中关于u分区的ISR数据以及broker中元数据的缓存.
           shrinkIsr(outOfSyncReplicaIds)
 
+          // 尝试更新leader副本的HW值.
           // we may need to increment high watermark since ISR could be down to 1
           maybeIncrementLeaderHW(leaderLog)
         } else {
@@ -965,9 +970,12 @@ class Partition(val topicPartition: TopicPartition,
       }
     }
 
+    // 如果leader HW值提高了.
     // some delayed operations may be unblocked after HW changed
-    if (leaderHWIncremented)
+    if (leaderHWIncremented) {
+      // 尝试解锁一下延时请求.
       tryCompleteDelayedRequests()
+    }
   }
 
   private def needsShrinkIsr(): Boolean = {
@@ -1060,18 +1068,22 @@ class Partition(val topicPartition: TopicPartition,
           val inSyncSize = isrState.isr.size
 
           // Avoid writing to leader if there are not enough insync replicas to make it safe
+          // 如果 ack 设置为-1, isr 数小于设置的 min.isr 时,就会向 producer 抛出相应的异常
           if (inSyncSize < minIsr && requiredAcks == -1) {
             throw new NotEnoughReplicasException(s"The size of the current ISR ${isrState.isr} " +
               s"is insufficient to satisfy the min.isr requirement of $minIsr for partition $topicPartition")
           }
 
+          // 向副本对应的 log 追加响应的数据
           val info = leaderLog.appendAsLeader(records, leaderEpoch = this.leaderEpoch, origin,
             interBrokerProtocolVersion)
 
           // we may need to increment high watermark since ISR could be down to 1
+          // 判断是否需要增加 HHW(追加日志后会进行一次判断)
           (info, maybeIncrementLeaderHW(leaderLog))
 
         case None =>
+          // Leader 不在本台机器上.
           throw new NotLeaderOrFollowerException("Leader not local for partition %s on broker %d"
             .format(topicPartition, localBrokerId))
       }
@@ -1219,8 +1231,10 @@ class Partition(val topicPartition: TopicPartition,
     val allOffsets = localLog.legacyFetchOffsetsBefore(timestamp, maxNumOffsets)
 
     if (!isFromConsumer) {
+      // follower 副本可以读取  LEO以下的值.
       allOffsets
     } else {
+      // 普通消费这只能读取  hw以下的值.
       val hw = localLog.highWatermark
       if (allOffsets.exists(_ > hw))
         hw +: allOffsets.dropWhile(_ > hw)
