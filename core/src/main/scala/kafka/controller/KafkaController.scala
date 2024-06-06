@@ -68,15 +68,20 @@ object KafkaController extends Logging {
   type UpdateFeaturesCallback = Either[ApiError, Map[String, ApiError]] => Unit
 }
 
-class KafkaController(val config: KafkaConfig,
+class KafkaController(val config: KafkaConfig, // kafka 配置信息, 可以获取broker 配置参数的值.
+                      // zkCli,负责 kafka broker 与 zookeeper 的所有交互.
                       zkClient: KafkaZkClient,
                       time: Time,
                       metrics: Metrics,
                       initialBrokerInfo: BrokerInfo,
+                      // broker 节点信息, 主机名, 端口号,对应监听器
                       initialBrokerEpoch: Long,
+                      // 用于隔离老的 Controller发送的 请求
                       tokenManager: DelegationTokenManager,
+                      // 实现 Delegation token 的管理工具类.
                       brokerFeatures: BrokerFeatures,
                       featureCache: FinalizedFeatureCache,
+                      // Controller端事件处理线程名前缀
                       threadNamePrefix: Option[String] = None)
   extends ControllerEventProcessor with Logging with KafkaMetricsGroup {
 
@@ -87,10 +92,13 @@ class KafkaController(val config: KafkaConfig,
 
   private val isAlterIsrEnabled = config.interBrokerProtocolVersion.isAlterIsrSupported
   private val stateChangeLogger = new StateChangeLogger(config.brokerId, inControllerContext = true, None)
+  // 集群元数据, 保存集群所有元数据.
   val controllerContext = new ControllerContext
+  // Controller 端通道管理器, 负责Controller 端向Broker发送请求.
   var controllerChannelManager = new ControllerChannelManager(controllerContext, config, time, metrics,
     stateChangeLogger, threadNamePrefix)
 
+  // 线程调度器, 当前唯一负责分区重平衡的leader选举.
   // have a separate scheduler for the controller to be able to start and stop independently of the kafka server
   // visible for testing
   private[controller] val kafkaScheduler = new KafkaScheduler(1)
@@ -101,22 +109,35 @@ class KafkaController(val config: KafkaConfig,
 
   private val brokerRequestBatch = new ControllerBrokerRequestBatch(config, controllerChannelManager,
     eventManager, controllerContext, stateChangeLogger)
+  // 副本状态机, 负责副本状态转换.
   val replicaStateMachine: ReplicaStateMachine = new ZkReplicaStateMachine(config, stateChangeLogger, controllerContext, zkClient,
     new ControllerBrokerRequestBatch(config, controllerChannelManager, eventManager, controllerContext, stateChangeLogger))
+  // 分区状态机, 负责分区状态转换.
   val partitionStateMachine: PartitionStateMachine = new ZkPartitionStateMachine(config, stateChangeLogger, controllerContext, zkClient,
     new ControllerBrokerRequestBatch(config, controllerChannelManager, eventManager, controllerContext, stateChangeLogger))
+  // 主题删除管理器. 负责删除主题与 log.
   val topicDeletionManager = new TopicDeletionManager(config, controllerContext, replicaStateMachine,
     partitionStateMachine, new ControllerDeletionClient(this, zkClient))
 
+  // Controller 节点 zookeeper 监听器.
   private val controllerChangeHandler = new ControllerChangeHandler(eventManager)
+  // broker 数量zookeeper 监听器.
   private val brokerChangeHandler = new BrokerChangeHandler(eventManager)
+  // broker 信息变更 zookeeper 监听器.
   private val brokerModificationsHandlers: mutable.Map[Int, BrokerModificationsHandler] = mutable.Map.empty
+  //主题数量变更监听器.
   private val topicChangeHandler = new TopicChangeHandler(eventManager)
+  // 主题删除 zk监听器.
   private val topicDeletionHandler = new TopicDeletionHandler(eventManager)
+  // 主题分区重变更 zk 监听器.
   private val partitionModificationsHandlers: mutable.Map[String, PartitionModificationsHandler] = mutable.Map.empty
+  // 主题分区重分配 zk 监听器.
   private val partitionReassignmentHandler = new PartitionReassignmentHandler(eventManager)
+  // preferred leader 选举 zk监听器.
   private val preferredReplicaElectionHandler = new PreferredReplicaElectionHandler(eventManager)
+  // ISR 副本集合变更监听器.
   private val isrChangeNotificationHandler = new IsrChangeNotificationHandler(eventManager)
+  // 日志路径变更 zk监听器.
   private val logDirEventNotificationHandler = new LogDirEventNotificationHandler(eventManager)
 
   @volatile private var activeControllerId = -1
@@ -158,6 +179,7 @@ class KafkaController(val config: KafkaConfig,
    * elector
    */
   def startup() = {
+    // 注册Zookeeper状态变更监听器,用于监听zookeeper 会话过期的.
     zkClient.registerStateChangeHandler(new StateChangeHandler {
       override val name: String = StateChangeHandlers.ControllerHandler
       override def afterInitializingSession(): Unit = {
@@ -171,7 +193,9 @@ class KafkaController(val config: KafkaConfig,
         queuedEvent.awaitProcessing()
       }
     })
+    // 2. 将 Startup事件添加到事件队列.
     eventManager.put(Startup)
+    // 3. 启动事件处理线程, 开始处理事件队列中的 controllerEvent.
     eventManager.start()
   }
 
@@ -456,8 +480,10 @@ class KafkaController(val config: KafkaConfig,
     zkClient.unregisterZNodeChildChangeHandler(logDirEventNotificationHandler.path)
     unregisterBrokerModificationsHandler(brokerModificationsHandlers.keySet)
 
+    // 取消 leader 定期重选举.
     // shutdown leader rebalance scheduler
     kafkaScheduler.shutdown()
+    // 将 统计字段 全部清0.
     offlinePartitionCount = 0
     preferredReplicaImbalanceCount = 0
     globalTopicCount = 0
@@ -467,10 +493,12 @@ class KafkaController(val config: KafkaConfig,
     ineligibleTopicsToDeleteCount = 0
     ineligibleReplicasToDeleteCount = 0
 
+    // 关闭 token 过期检查调度器.
     // stop token expiry check scheduler
     if (tokenCleanScheduler.isStarted)
       tokenCleanScheduler.shutdown()
 
+    // 取消分区重分配监听器的注册的.
     // de-register partition ISR listener for on-going partition reassignment task
     unregisterPartitionReassignmentIsrChangeHandlers()
     // shutdown partition state machine
@@ -482,7 +510,9 @@ class KafkaController(val config: KafkaConfig,
     replicaStateMachine.shutdown()
     zkClient.unregisterZNodeChildChangeHandler(brokerChangeHandler.path)
 
+    // 关闭 controller通道管理器.
     controllerChannelManager.shutdown()
+    // 清空集群元数据
     controllerContext.resetContext()
 
     info("Resigned")
@@ -517,16 +547,20 @@ class KafkaController(val config: KafkaConfig,
    */
   private def onBrokerStartup(newBrokers: Seq[Int]): Unit = {
     info(s"New broker startup callback for ${newBrokers.mkString(",")}")
+    // 移除元数据中新增的broker 对应的副本集合.
     newBrokers.foreach(controllerContext.replicasOnOfflineDirs.remove)
     val newBrokersSet = newBrokers.toSet
     val existingBrokers = controllerContext.liveOrShuttingDownBrokerIds.diff(newBrokersSet)
+    // 2. 给集群现有的 broker 发送元数据更新请求, 令他们感知到新增的broker.
     // Send update metadata request to all the existing brokers in the cluster so that they know about the new brokers
     // via this update. No need to include any partition states in the request since there are no partition state changes.
     sendUpdateMetadataRequest(existingBrokers.toSeq, Set.empty)
+    // 3. 给集群现有的 broker 发送元数据更新请求, 令他们同步当前所有分区数据.
     // Send update metadata request to all the new brokers in the cluster with a full set of partition states for initialization.
     // In cases of controlled shutdown leaders will not be elected when a new broker comes up. So at least in the
     // common controlled shutdown case, the metadata will reach the new brokers faster.
     sendUpdateMetadataRequest(newBrokers, controllerContext.partitionsWithLeaders)
+    // 4. 将broker上所有副本置为 online状态, 可用状态.
     // the very first thing to do when a new broker comes up is send it the entire list of partitions that it is
     // supposed to host. Based on that the broker starts the high watermark threads for the input list of partitions
     val allReplicasOnNewBrokers = controllerContext.replicasOnBrokers(newBrokersSet)
@@ -534,6 +568,7 @@ class KafkaController(val config: KafkaConfig,
     // when a new broker comes up, the controller needs to trigger leader election for all new and offline partitions
     // to see if these brokers can become leaders for some/all of those
     partitionStateMachine.triggerOnlinePartitionStateChange()
+    // 5. 重启之前暂停的 副本迁移操作.
     // check if reassignment of some partitions need to be restarted
     maybeResumeReassignments { (_, assignment) =>
       assignment.targetReplicas.exists(newBrokersSet.contains)
@@ -541,12 +576,14 @@ class KafkaController(val config: KafkaConfig,
     // check if topic deletion needs to be resumed. If at least one replica that belongs to the topic being deleted exists
     // on the newly restarted brokers, there is a chance that topic deletion can resume
     val replicasForTopicsToBeDeleted = allReplicasOnNewBrokers.filter(p => topicDeletionManager.isTopicQueuedUpForDeletion(p.topic))
+    // 6. 重启之前暂停的主题删除操作.
     if (replicasForTopicsToBeDeleted.nonEmpty) {
       info(s"Some replicas ${replicasForTopicsToBeDeleted.mkString(",")} for topics scheduled for deletion " +
         s"${controllerContext.topicsToBeDeleted.mkString(",")} are on the newly restarted brokers " +
         s"${newBrokers.mkString(",")}. Signaling restart of topic deletion for these topics")
       topicDeletionManager.resumeDeletionForTopics(replicasForTopicsToBeDeleted.map(_.topic))
     }
+    // 7. 为新增的Broker注册 zk监听器(BrokerModificationsHandler)
     registerBrokerModificationsHandler(newBrokers)
   }
 
@@ -579,15 +616,22 @@ class KafkaController(val config: KafkaConfig,
    * as input. It will call onReplicaBecomeOffline(...) with the list of replicas on those failed brokers as input.
    */
   private def onBrokerFailure(deadBrokers: Seq[Int]): Unit = {
+    // 1. 给定一组已经装置运行的 brokerID 列表
+    // 更新Broker 元信息, 将给定的 broker 从元数据的 replicaOnOfflineDirs 删除
     info(s"Broker failure callback for ${deadBrokers.mkString(",")}")
+    // 2. 将 待移除 brokerID 从 元数据对象中处于已关闭状态的Broker列表中移除.
     deadBrokers.foreach(controllerContext.replicasOnOfflineDirs.remove)
+    // 3. 找出这些borker上所有的副本对象.
+    // 执行对应的操作, 将其置为不可用状态(offline).
     val deadBrokersThatWereShuttingDown =
       deadBrokers.filter(id => controllerContext.shuttingDownBrokerIds.remove(id))
     if (deadBrokersThatWereShuttingDown.nonEmpty)
       info(s"Removed ${deadBrokersThatWereShuttingDown.mkString(",")} from list of shutting down brokers.")
     val allReplicasOnDeadBrokers = controllerContext.replicasOnBrokers(deadBrokers.toSet)
+    // 将 副本置为offline
     onReplicasBecomeOffline(allReplicasOnDeadBrokers)
 
+    //  // 4. 取消这些broker上注册的zookeeper监听器(BrokerModificationsHandler).
     unregisterBrokerModificationsHandler(deadBrokers)
   }
 
@@ -1488,10 +1532,16 @@ class KafkaController(val config: KafkaConfig,
   }
 
   private def maybeResign(): Unit = {
+    // 判断是否需要执行 controller 卸任逻辑.
+    // 判断 该 broker 之前是不是 controller.
     val wasActiveBeforeChange = isActive
+    // 注册 controllerChangeHandler 监听器
     zkClient.registerZNodeChangeHandlerAndCheckExistence(controllerChangeHandler)
+    // 获取当前controller 所在的broker id, 如果没有 controller 返回-1.
     activeControllerId = zkClient.getControllerId.getOrElse(-1)
+    // 如果 broker 之前是 Controller 现在不是了.
     if (wasActiveBeforeChange && !isActive) {
+      // 执行 controller 卸任逻辑.
       onControllerResignation()
     }
   }
@@ -1558,11 +1608,15 @@ class KafkaController(val config: KafkaConfig,
   }
 
   private def processBrokerChange(): Unit = {
+    // 如果 该broker不是Controller，无权处理 返回.
     if (!isActive) return
+    // 1. 从 zk 中获取 broker列表.
     val curBrokerAndEpochs = zkClient.getAllBrokerAndEpochsInCluster
     val curBrokerIdAndEpochs = curBrokerAndEpochs map { case (broker, epoch) => (broker.id, epoch) }
     val curBrokerIds = curBrokerIdAndEpochs.keySet
+    // 2.获取broker 中当前保存的 broker列表.
     val liveOrShuttingDownBrokerIds = controllerContext.liveOrShuttingDownBrokerIds
+    // 3.比较两个列表, 获取新增的, 删除的, 已重启的和当前运行中 broker列表.
     val newBrokerIds = curBrokerIds.diff(liveOrShuttingDownBrokerIds)
     val deadBrokerIds = liveOrShuttingDownBrokerIds.diff(curBrokerIds)
     val bouncedBrokerIds = (curBrokerIds & liveOrShuttingDownBrokerIds)
@@ -1578,11 +1632,15 @@ class KafkaController(val config: KafkaConfig,
       s"bounced brokers: ${bouncedBrokerIdsSorted.mkString(",")}, " +
       s"all live brokers: ${liveBrokerIdsSorted.mkString(",")}")
 
+    // 4.为每个新增的 broker 创建连接管理器 和 底层发送请求线程(SendRequestThread)
     newBrokerAndEpochs.keySet.foreach(controllerChannelManager.addBroker)
+    // 5.为每个已重启的broker 移除现有的配套资源(通道管理器 & SendRequestThread), 并重新添加他们.
     bouncedBrokerIds.foreach(controllerChannelManager.removeBroker)
     bouncedBrokerAndEpochs.keySet.foreach(controllerChannelManager.addBroker)
+    // 6.为每个带移除的broker 移除现有的配套资源.
     deadBrokerIds.foreach(controllerChannelManager.removeBroker)
 
+    // 7.为新增的broker执行更新Controller元数据和broker启动逻辑.
     if (newBrokerIds.nonEmpty) {
       val (newCompatibleBrokerAndEpochs, newIncompatibleBrokerAndEpochs) =
         partitionOnFeatureCompatibility(newBrokerAndEpochs)
@@ -1593,6 +1651,7 @@ class KafkaController(val config: KafkaConfig,
       controllerContext.addLiveBrokers(newCompatibleBrokerAndEpochs)
       onBrokerStartup(newBrokerIdsSorted)
     }
+    // 8.为重启的 broker执行重新添加逻辑(更新 ControllerContext， 执行Broker重启动.)
     if (bouncedBrokerIds.nonEmpty) {
       controllerContext.removeLiveBrokers(bouncedBrokerIds)
       onBrokerFailure(bouncedBrokerIdsSorted)
@@ -1605,6 +1664,7 @@ class KafkaController(val config: KafkaConfig,
       controllerContext.addLiveBrokers(bouncedCompatibleBrokerAndEpochs)
       onBrokerStartup(bouncedBrokerIdsSorted)
     }
+    // 9.为待移除的broker 移除ControllerContext 和 Broker终止逻辑.
     if (deadBrokerIds.nonEmpty) {
       controllerContext.removeLiveBrokers(deadBrokerIds)
       onBrokerFailure(deadBrokerIdsSorted)
@@ -1617,11 +1677,15 @@ class KafkaController(val config: KafkaConfig,
 
   private def processBrokerModification(brokerId: Int): Unit = {
     if (!isActive) return
+    // 获取 目标 broker 的详细数据(主机名 端口号 以及所使用的 安全协议.).
     val newMetadataOpt = zkClient.getBroker(brokerId)
+    // 从元数据缓存中获得目标 broker的详细数据.
     val oldMetadataOpt = controllerContext.liveOrShuttingDownBroker(brokerId)
     if (newMetadataOpt.nonEmpty && oldMetadataOpt.nonEmpty) {
       val oldMetadata = oldMetadataOpt.get
       val newMetadata = newMetadataOpt.get
+      // broker 数据发生了变更，
+      // 更新元数据缓存, 以及执行 broker onBrokerUpdate(), 处理 broker更新逻辑。
       if (newMetadata.endPoints != oldMetadata.endPoints || !oldMetadata.features.equals(newMetadata.features)) {
         info(s"Updated broker metadata: $oldMetadata -> $newMetadata")
         controllerContext.updateBrokerMetadata(oldMetadata, newMetadata)
@@ -1632,16 +1696,24 @@ class KafkaController(val config: KafkaConfig,
 
   private def processTopicChange(): Unit = {
     if (!isActive) return
+    // 1. 获取zk中所有的主题.
     val topics = zkClient.getAllTopicsInCluster(true)
+    // 2. 与元数据库对比, 找出新增主题列表与 已删除主题列表.
     val newTopics = topics -- controllerContext.allTopics
     val deletedTopics = controllerContext.allTopics.diff(topics)
+    // 3. 使用zk的主题列表更新元数据缓存.
     controllerContext.setAllTopics(topics)
 
+    // 4. 为新增主题注册 zk监听器(PartitionModificationsHandlers)
+    // 分区变更监听器(监听主题分区变更的)
     registerPartitionModificationsHandlers(newTopics.toSeq)
+    // 5. 从zookeeper中获取新增主题的副本分配条目.
     val addedPartitionReplicaAssignment = zkClient.getReplicaAssignmentAndTopicIdForTopics(newTopics)
+    // 6. 清空元数据缓存中已删除的 主题.
     deletedTopics.foreach(controllerContext.removeTopic)
     processTopicIds(addedPartitionReplicaAssignment)
 
+    // 7. 为新增主题更新元数据缓存中副本分配条目.
     addedPartitionReplicaAssignment.foreach { case TopicIdReplicaAssignment(_, _, newAssignments) =>
       newAssignments.foreach { case (topicAndPartition, newReplicaAssignment) =>
         controllerContext.updatePartitionFullReplicaAssignment(topicAndPartition, newReplicaAssignment)
@@ -1649,6 +1721,7 @@ class KafkaController(val config: KafkaConfig,
     }
     info(s"New topics: [$newTopics], deleted topics: [$deletedTopics], new partition replica assignment " +
       s"[$addedPartitionReplicaAssignment]")
+    // 8. 调整新增主题所有分区以及所有副本的运行状态为上线(online)状态.
     if (addedPartitionReplicaAssignment.nonEmpty) {
       val partitionAssignments = addedPartitionReplicaAssignment
         .map { case TopicIdReplicaAssignment(_, _, partitionsReplicas) => partitionsReplicas.keySet }
@@ -2577,8 +2650,9 @@ case class LeaderIsrAndControllerEpoch(leaderAndIsr: LeaderAndIsr, controllerEpo
 }
 
 private[controller] class ControllerStats extends KafkaMetricsGroup {
+  // 统计每秒发生 UncleanLeader 选举次数
   val uncleanLeaderElectionRate = newMeter("UncleanLeaderElectionsPerSec", "elections", TimeUnit.SECONDS)
-
+  // Controller 事件通用的统计速率指标方法
   val rateAndTimeMetrics: Map[ControllerState, KafkaTimer] = ControllerState.values.flatMap { state =>
     state.rateAndTimeMetricName.map { metricName =>
       state -> new KafkaTimer(newTimer(metricName, TimeUnit.MILLISECONDS, TimeUnit.SECONDS))

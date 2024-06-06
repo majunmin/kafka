@@ -168,6 +168,7 @@ class GroupCoordinator(val brokerId: Int,
       return
     }
 
+    // group.min.session.timeout < sessionTimeout < group.max.session.timeout
     if (sessionTimeoutMs < groupConfig.groupMinSessionTimeoutMs ||
       sessionTimeoutMs > groupConfig.groupMaxSessionTimeoutMs) {
       responseCallback(JoinGroupResult(memberId, Errors.INVALID_SESSION_TIMEOUT))
@@ -343,11 +344,14 @@ class GroupCoordinator(val brokerId: Int,
   }
 
   def handleSyncGroup(groupId: String,
+                      // 消费者组的generation号,类似于任期号,标志了Coordinator为该消费者组处理的 rebalance次数
                       generation: Int,
                       memberId: String,
                       protocolType: Option[String],
+                       // 消费者组选定的分区消费分配策略. 选择方式是: GroupMetadata.selectProtocol()
                       protocolName: Option[String],
                       groupInstanceId: Option[String],
+                      // 按照成员id分组的分配方案, 只有Leader 成员发送的 SyncGroupRequest 才包含这个方案.
                       groupAssignment: Map[String, Array[Byte]],
                       responseCallback: SyncCallback): Unit = {
     validateGroupStatus(groupId, ApiKeys.SYNC_GROUP) match {
@@ -361,8 +365,10 @@ class GroupCoordinator(val brokerId: Int,
       case Some(error) => responseCallback(SyncGroupResult(error))
 
       case None =>
+        // 获取消费者组 元数据.
         groupManager.getGroup(groupId) match {
           case None => responseCallback(SyncGroupResult(Errors.UNKNOWN_MEMBER_ID))
+          // 找到了消费者组元数据, 执行同步任务.
           case Some(group) => doSyncGroup(group, generation, memberId, protocolType, protocolName,
             groupInstanceId, groupAssignment, responseCallback)
         }
@@ -386,12 +392,16 @@ class GroupCoordinator(val brokerId: Int,
         responseCallback(SyncGroupResult(Errors.COORDINATOR_NOT_AVAILABLE))
       } else if (group.isStaticMemberFenced(memberId, groupInstanceId, "sync-group")) {
         responseCallback(SyncGroupResult(Errors.FENCED_INSTANCE_ID))
+        // 该成员是否属于这个组.
       } else if (!group.has(memberId)) {
         responseCallback(SyncGroupResult(Errors.UNKNOWN_MEMBER_ID))
+        // generationId 是否一致
       } else if (generationId != group.generationId) {
         responseCallback(SyncGroupResult(Errors.ILLEGAL_GENERATION))
+        // 协议类型是否一致
       } else if (protocolType.isDefined && !group.protocolType.contains(protocolType.get)) {
         responseCallback(SyncGroupResult(Errors.INCONSISTENT_GROUP_PROTOCOL))
+        // 分区分配策略是否一致
       } else if (protocolName.isDefined && !group.protocolName.contains(protocolName.get)) {
         responseCallback(SyncGroupResult(Errors.INCONSISTENT_GROUP_PROTOCOL))
       } else {
@@ -405,11 +415,13 @@ class GroupCoordinator(val brokerId: Int,
           case CompletingRebalance =>
             group.get(memberId).awaitingSyncCallback = responseCallback
 
+            // leader 发送的 SyncGroupRequest 需要特殊处理.
             // if this is the leader, then we can attempt to persist state and transition to stable
             if (group.isLeader(memberId)) {
               info(s"Assignment received from leader for group ${group.groupId} for generation ${group.generationId}. " +
                 s"The group has ${group.size} members, ${group.allStaticMembers.size} of which are static.")
 
+              // 如果有成员 没有被分配任何消费方案, 则创建一个空方案赋给他.
               // fill any missing members with an empty assignment
               val missing = group.allMembers.diff(groupAssignment.keySet)
               val assignment = groupAssignment ++ missing.map(_ -> Array.empty[Byte]).toMap
@@ -418,6 +430,7 @@ class GroupCoordinator(val brokerId: Int,
                 warn(s"Setting empty assignments for members $missing of ${group.groupId} for generation ${group.generationId}")
               }
 
+              // 将消费者组信息保存到消费者组元数据中, 并将其写入内部位移主题.
               groupManager.storeGroup(group, assignment, (error: Errors) => {
                 group.inLock {
                   // another member may have joined the group while we were awaiting this callback,
@@ -425,9 +438,11 @@ class GroupCoordinator(val brokerId: Int,
                   // when it gets invoked. if we have transitioned to another state, then do nothing
                   if (group.is(CompletingRebalance) && generationId == group.generationId) {
                     if (error != Errors.NONE) {
+                      // 清空分配方案并发送给所有成员.
                       resetAndPropagateAssignmentError(group, error)
                       maybePrepareRebalance(group, s"error when storing group assignment during SyncGroup (member: $memberId)")
                     } else {
+                      // 在消费者组元数据中保存分配方案并发送给所有成员.
                       setAndPropagateAssignment(group, assignment)
                       group.transitionTo(Stable)
                     }
@@ -437,6 +452,7 @@ class GroupCoordinator(val brokerId: Int,
               groupCompletedRebalanceSensor.record()
             }
 
+          // 消费者已经处于正常状态,无需同步.
           case Stable =>
             // if the group is stable, we just return the current assignment
             val memberMetadata = group.get(memberId)
@@ -998,15 +1014,19 @@ class GroupCoordinator(val brokerId: Int,
                                     protocols: List[(String, Array[Byte])],
                                     group: GroupMetadata,
                                     callback: JoinCallback): Unit = {
+    // 创建 memberMetadata 对象实例,
     val member = new MemberMetadata(memberId, groupInstanceId, clientId, clientHost,
       rebalanceTimeoutMs, sessionTimeoutMs, protocolType, protocols)
 
+    // 标志该成员是新成员.
     member.isNew = true
 
+    // 如果消费者组首次开启Rebalance, 设置  group.newMemberAdded = true
     // update the newMemberAdded flag to indicate that the join group can be further delayed
     if (group.is(PreparingRebalance) && group.generationId == 0)
       group.newMemberAdded = true
 
+    // 添加成员至消费者组
     group.add(member, callback)
 
     // The session timeout does not affect new members since they do not have their memberId and
@@ -1023,6 +1043,7 @@ class GroupCoordinator(val brokerId: Int,
     } else {
       group.removePendingMember(memberId)
     }
+    // 准备开启 Rebalance
     maybePrepareRebalance(group, s"Adding new member $memberId with group instance id $groupInstanceId")
   }
 

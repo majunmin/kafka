@@ -77,21 +77,31 @@ class ControllerContext {
   var offlinePartitionCount = 0
   var preferredReplicaImbalanceCount = 0
   val shuttingDownBrokerIds = mutable.Set.empty[Int]
+  // 保存运行中的 brokerIDs
   private val liveBrokers = mutable.Set.empty[Broker]
+  // 保存运行中的 brokerIDs 列表. kafka使用 liveBrokerEpochs防止zombie broker  成为leader
   private val liveBrokerEpochs = mutable.Map.empty[Int, Long]
   var epoch: Int = KafkaController.InitialControllerEpoch
   var epochZkVersion: Int = KafkaController.InitialControllerEpochZkVersion
 
+ // 集群主题列表
   val allTopics = mutable.Set.empty[String]
   var topicIds = mutable.Map.empty[String, Uuid]
   var topicNames = mutable.Map.empty[Uuid, String]
+   // 主题分区副本列表
   val partitionAssignments = mutable.Map.empty[String, mutable.Map[Int, ReplicaAssignment]]
+   // 主题分区Leader/ISR 副本信息
   private val partitionLeadershipInfo = mutable.Map.empty[TopicPartition, LeaderIsrAndControllerEpoch]
+   // 处于副本重分配过程的主题分区列表
   val partitionsBeingReassigned = mutable.Set.empty[TopicPartition]
+   // 主题分区状态列表
   val partitionStates = mutable.Map.empty[TopicPartition, PartitionState]
+   // 主题分区副本状态列表
   val replicaStates = mutable.Map.empty[PartitionAndReplica, ReplicaState]
+  //不可用磁盘路径上的副本列表
   val replicasOnOfflineDirs = mutable.Map.empty[Int, Set[TopicPartition]]
 
+  // 待删除的主题列表
   val topicsToBeDeleted = mutable.Set.empty[String]
 
   /** The following topicsWithDeletionStarted variable is used to properly update the offlinePartitionCount metric.
@@ -114,6 +124,7 @@ class ControllerContext {
    * its partition state changes in the offlinePartitionCount metric
    */
   val topicsWithDeletionStarted = mutable.Set.empty[String]
+   // 暂时无法执行删除的主题列表
   val topicsIneligibleForDeletion = mutable.Set.empty[String]
 
   private def clearTopicsState(): Unit = {

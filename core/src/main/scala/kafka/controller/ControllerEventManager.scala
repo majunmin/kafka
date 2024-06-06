@@ -42,9 +42,12 @@ trait ControllerEventProcessor {
 
 class QueuedEvent(val event: ControllerEvent,
                   val enqueueTimeMs: Long) {
+  // 标志事件是否开始处理
   val processingStarted = new CountDownLatch(1)
+  // 标志事件是否被处理过
   val spent = new AtomicBoolean(false)
 
+  // 处理事件
   def process(processor: ControllerEventProcessor): Unit = {
     if (spent.getAndSet(true))
       return
@@ -52,12 +55,14 @@ class QueuedEvent(val event: ControllerEvent,
     processor.process(event)
   }
 
+  // 抢占式处理事件
   def preempt(processor: ControllerEventProcessor): Unit = {
     if (spent.getAndSet(true))
       return
     processor.preempt(event)
   }
 
+  // 阻塞等待事件处理完成.
   def awaitProcessing(): Unit = {
     processingStarted.await()
   }
@@ -108,6 +113,7 @@ class ControllerEventManager(controllerId: Int,
   def clearAndPut(event: ControllerEvent): QueuedEvent = inLock(putLock){
     val preemptedEvents = new ArrayList[QueuedEvent]()
     queue.drainTo(preemptedEvents)
+    // 处理抢占式 事件.
     preemptedEvents.forEach(_.preempt(processor))
     put(event)
   }
@@ -118,17 +124,21 @@ class ControllerEventManager(controllerId: Int,
     logIdent = s"[ControllerEventThread controllerId=$controllerId] "
 
     override def doWork(): Unit = {
+      // 从 事件队列中获取待处理的Controller事件,
       val dequeued = pollFromEventQueue()
       dequeued.event match {
+        // 如果是线程关闭事件, 什么都不用做. 由外部来执行
         case ShutdownEventThread => // The shutting down of the thread has been initiated at this point. Ignore this event.
         case controllerEvent =>
           _state = controllerEvent.state
 
+          // 更新事件在对队列中的保存时间.(metrics)
           eventQueueTimeHist.update(time.milliseconds() - dequeued.enqueueTimeMs)
 
           try {
             def process(): Unit = dequeued.process(processor)
 
+            // 处理事件并计算对应的处理速率.
             rateAndTimeMetrics.get(state) match {
               case Some(timer) => timer.time { process() }
               case None => process()

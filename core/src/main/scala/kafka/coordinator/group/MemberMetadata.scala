@@ -57,13 +57,18 @@ private[group] class MemberMetadata(var memberId: String,
                                     val groupInstanceId: Option[String],
                                     val clientId: String,
                                     val clientHost: String,
+                                     // reblance 超时时间
                                     val rebalanceTimeoutMs: Int,
                                     val sessionTimeoutMs: Int,
                                     val protocolType: String,
+                                     // 成员配置的多套分区分配策略
                                     var supportedProtocols: List[(String, Array[Byte])],
+                                    // 分区分配方案(保存分配给该成员的分区.)
                                     var assignment: Array[Byte] = Array.empty[Byte]) {
 
+  // 表示组成员是否正在等待加入组
   var awaitingJoinCallback: JoinGroupResult => Unit = null
+  // 表示组成员是否正在等待 GroupCoordinate 发送分配方案
   var awaitingSyncCallback: SyncGroupResult => Unit = null
   var isLeaving: Boolean = false
   var isNew: Boolean = false

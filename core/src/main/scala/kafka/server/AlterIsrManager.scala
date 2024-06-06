@@ -117,6 +117,7 @@ class DefaultAlterIsrManager(
   // Used to allow only one pending ISR update per partition (visible for testing)
   private[server] val unsentIsrUpdates: util.Map[TopicPartition, AlterIsrItem] = new ConcurrentHashMap[TopicPartition, AlterIsrItem]()
 
+  // 用于一次仅允许一个 in-flight request
   // Used to allow only one in-flight request at a time
   private val inflightRequest: AtomicBoolean = new AtomicBoolean(false)
 
@@ -139,11 +140,15 @@ class DefaultAlterIsrManager(
   }
 
   private[server] def maybePropagateIsrChanges(): Unit = {
+    // ISR 变更传播条件:
+    // 1. 存在尚未被传播的 ISR 变更.
+    // 2. cas 的将 inflightRequest 由 false -> true.
     // Send all pending items if there is not already a request in-flight.
     if (!unsentIsrUpdates.isEmpty && inflightRequest.compareAndSet(false, true)) {
       // Copy current unsent ISRs but don't remove from the map, they get cleared in the response handler
       val inflightAlterIsrItems = new ListBuffer[AlterIsrItem]()
       unsentIsrUpdates.values().forEach(item => inflightAlterIsrItems.append(item))
+      // 发送 ISR 变更.
       sendRequest(inflightAlterIsrItems.toSeq)
     }
   }

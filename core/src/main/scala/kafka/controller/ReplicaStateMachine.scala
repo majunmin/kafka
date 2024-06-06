@@ -104,13 +104,21 @@ class ZkReplicaStateMachine(config: KafkaConfig,
   private val controllerId = config.brokerId
   this.logIdent = s"[ReplicaStateMachine controllerId=$controllerId] "
 
+  /**
+   * 处理状态变更, 对外提供状态转换的操作的入口方法.
+   * @param replicas
+   * @param targetState
+   */
   override def handleStateChanges(replicas: Seq[PartitionAndReplica], targetState: ReplicaState): Unit = {
     if (replicas.nonEmpty) {
       try {
         controllerBrokerRequestBatch.newBatch()
+        // 将所有副本对象按照 brokerID 分组, 依次执行状态转换操作.
         replicas.groupBy(_.replica).forKeyValue { (replicaId, replicas) =>
+          // -- 真正执行副本状态转换.
           doHandleStateChanges(replicaId, replicas, targetState)
         }
+        // 发送对应的 Controller 请求给 broker
         controllerBrokerRequestBatch.sendRequestsToBrokers(controllerContext.epoch)
       } catch {
         case e: ControllerMovedException =>
