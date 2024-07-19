@@ -139,9 +139,10 @@ abstract class AbstractIndex(@volatile private var _file: File, val baseOffset: 
       else
         // if this is a pre-existing index, assume it is valid and set position to last entry
         idx.position(roundDownToExactMultiple(idx.limit(), entrySize))
-      // 返回创建的 MappedByteBuffer 对象.
+      // 7. 返回创建的 MappedByteBuffer 对象.
       idx
     } finally {
+      // 关闭打开的索引文件句柄.
       CoreUtils.swallow(raf.close(), AbstractIndex)
     }
   }

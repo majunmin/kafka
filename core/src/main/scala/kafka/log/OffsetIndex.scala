@@ -140,22 +140,24 @@ class OffsetIndex(_file: File, baseOffset: Long, maxIndexSize: Int = -1, writabl
    */
   def append(offset: Long, position: Int): Unit = {
     inLock(lock) {
-      // 判断索引文件未写满.
+      // 1. 判断索引文件未写满.
       require(!isFull, "Attempt to append to a full index (size = " + _entries + ").")
       // 2. 满足一下条件之一才允许写入索引项.
       // - 当前索引文件为空.
       // - 写入的位移 > 当前所有已写入的索引项的位移(kafka规定索引项中的位移值必须是单调递增的)
       if (_entries == 0 || offset > _lastOffset) {
         trace(s"Adding index entry $offset => $position to ${file.getAbsolutePath}")
-        mmap.putInt(relativeOffset(offset)) // mmap 写入相对位移值
-        mmap.putInt(position) // mmap写入物理位置信息
-        // 更新其他元数据统计信息,比如当前索引项计数器&当前索引项位移值.
+        // 3.1 mmap 写入相对位移值
+        mmap.putInt(relativeOffset(offset))
+        // 3.2mmap写入物理位置信息
+        mmap.putInt(position)
+        // 4. 更新其他元数据统计信息,比如当前索引项计数器&当前索引项位移值.
         _entries += 1
         _lastOffset = offset
-        // 执行校验 写入索引项格式必须符合要求.
+        // 5. 执行校验 写入索引项格式必须符合要求.
         require(_entries * entrySize == mmap.position(), s"$entries entries but file position in index is ${mmap.position()}.")
       } else {
-        // 如果以上两个条件都不能满足, 不能执行写入索引项操作, 抛出异常.
+        // 6. 如果以上两个条件都不能满足, 不能执行写入索引项操作, 抛出异常.
         throw new InvalidOffsetException(s"Attempt to append an offset ($offset) to position $entries no larger than" +
           s" the last offset appended (${_lastOffset}) to ${file.getAbsolutePath}.")
       }

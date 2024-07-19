@@ -621,7 +621,7 @@ class KafkaController(val config: KafkaConfig, // kafka 配置信息, 可以获�
     info(s"Broker failure callback for ${deadBrokers.mkString(",")}")
     // 2. 将 待移除 brokerID 从 元数据对象中处于已关闭状态的Broker列表中移除.
     deadBrokers.foreach(controllerContext.replicasOnOfflineDirs.remove)
-    // 3. 找出这些borker上所有的副本对象.
+    // 3. 找出这些broker上所有的副本对象.
     // 执行对应的操作, 将其置为不可用状态(offline).
     val deadBrokersThatWereShuttingDown =
       deadBrokers.filter(id => controllerContext.shuttingDownBrokerIds.remove(id))
@@ -631,7 +631,7 @@ class KafkaController(val config: KafkaConfig, // kafka 配置信息, 可以获�
     // 将 副本置为offline
     onReplicasBecomeOffline(allReplicasOnDeadBrokers)
 
-    //  // 4. 取消这些broker上注册的zookeeper监听器(BrokerModificationsHandler).
+    // 4. 取消这些broker上注册的zookeeper监听器(BrokerModificationsHandler).
     unregisterBrokerModificationsHandler(deadBrokers)
   }
 
@@ -1608,7 +1608,7 @@ class KafkaController(val config: KafkaConfig, // kafka 配置信息, 可以获�
   }
 
   private def processBrokerChange(): Unit = {
-    // 如果 该broker不是Controller，无权处理 返回.
+    // 如果 该broker不是Controller,无权处理 返回.
     if (!isActive) return
     // 1. 从 zk 中获取 broker列表.
     val curBrokerAndEpochs = zkClient.getAllBrokerAndEpochsInCluster

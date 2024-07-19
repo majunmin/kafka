@@ -404,6 +404,7 @@ class RequestChannel(val queueSize: Int,
       case _: StartThrottlingResponse | _: EndThrottlingResponse => ()
     }
 
+    // 根据 response.processorID 找到对应的processor, 将 resonse 放入 响应队列(processor.responseQueue)
     val processor = processors.get(response.processor)
     // The processor may be null if it was shutdown. In this case, the connections
     // are closed, so the response is dropped.

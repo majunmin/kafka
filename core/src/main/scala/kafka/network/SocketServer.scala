@@ -630,8 +630,9 @@ private[kafka] class Acceptor(val endPoint: EndPoint,
    * Accept loop that checks for new connection attempts
    */
   def run(): Unit = {
-    // 向 serverSocketChannel 注册 OP_ACCEPT事件
+    // 1. 向 serverSocketChannel 注册 OP_ACCEPT事件
     serverChannel.register(nioSelector, SelectionKey.OP_ACCEPT)
+    // 等待 acceptor 线程启动完成.
     startupComplete()
     try {
       while (isRunning) {
@@ -687,6 +688,7 @@ private[kafka] class Acceptor(val endPoint: EndPoint,
   private def acceptNewConnections(): Unit = {
     val ready = nioSelector.select(500)
     if (ready > 0) {
+      // 获取就绪的io事件
       val keys = nioSelector.selectedKeys()
       val iter = keys.iterator()
       while (iter.hasNext && isRunning) {
@@ -695,6 +697,7 @@ private[kafka] class Acceptor(val endPoint: EndPoint,
           iter.remove()
 
           if (key.isAcceptable) {
+            // 调用accept()创建 socket连接
             accept(key).foreach { socketChannel =>
               // Assign the channel to the next processor (using round-robin) to which the
               // channel can be added without blocking. If newConnections queue is full on
@@ -703,6 +706,7 @@ private[kafka] class Acceptor(val endPoint: EndPoint,
               var processor: Processor = null
               do {
                 retriesLeft -= 1
+                // 指定由 哪个 processor 线程处理
                 processor = synchronized {
                   // adjust the index (if necessary) and retrieve the processor atomically for
                   // correct behaviour in case the number of processors is reduced dynamically
@@ -1045,6 +1049,7 @@ private[kafka] class Processor(val id: Int,
               trace(s"Begin re-authentication: $channel")
             else {
               val nowNanos = time.nanoseconds()
+              // 如果认证会话已过期,则关闭连接
               if (channel.serverAuthenticationSessionExpired(nowNanos)) {
                 // be sure to decrease connection count and drop any in-flight responses
                 debug(s"Disconnecting expired channel: $channel : $header")
