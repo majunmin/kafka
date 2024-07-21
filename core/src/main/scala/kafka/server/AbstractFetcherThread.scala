@@ -55,9 +55,13 @@ import scala.math._
  */
 abstract class AbstractFetcherThread(name: String,
                                      clientId: String,
+                                    // 数据源broker地址
                                      val sourceBroker: BrokerEndPoint,
+                                    //处理过程中出现失败的分区
                                      failedPartitions: FailedPartitions,
+                                    //获取操作重试间隔
                                      fetchBackOffMs: Int = 0,
+                                    //是否允许被中断
                                      isInterruptible: Boolean = true,
                                      val brokerTopicStats: BrokerTopicStats) //BrokerTopicStats's lifecycle managed by ReplicaManager
   extends ShutdownableThread(name, isInterruptible) {
@@ -129,6 +133,7 @@ abstract class AbstractFetcherThread(name: String,
     fetcherLagStats.unregister()
   }
 
+  // 循环执行...
   override def doWork(): Unit = {
     maybeTruncate()
     maybeFetch()
@@ -882,10 +887,13 @@ case class PartitionFetchState(fetchOffset: Long,
                                state: ReplicaState,
                                lastFetchedEpoch: Option[Int]) {
 
+  //分区数据可被获取的条件: 副本状态为 Fetching & 没有被延迟.
   def isReadyForFetch: Boolean = state == Fetching && !isDelayed
 
+  //副本处于ISR的条件
   def isReplicaInSync: Boolean = lag.isDefined && lag.get <= 0
 
+  // 分区处于截断中的条件: 副本状态为 Truncating & 没有被延迟.
   def isTruncating: Boolean = state == Truncating && !isDelayed
 
   def isDelayed: Boolean = delay.exists(_.getDelay(TimeUnit.MILLISECONDS) > 0)

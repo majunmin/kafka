@@ -42,6 +42,8 @@ class ControllerDeletionClient(controller: KafkaController, zkClient: KafkaZkCli
     zkClient.deleteTopicDeletions(Seq(topic), epochZkVersion)
   }
 
+  //删除 /admin/delete_topics 下的子节点
+  // epochZkVersion: 表示期望的 ControllerEpoch 的版本号, 如果使用的是一个 旧的 epoch执行这个方法, kafka会拒绝.
   override def deleteTopicDeletions(topics: Seq[String], epochZkVersion: Int): Unit = {
     zkClient.deleteTopicDeletions(topics, epochZkVersion)
   }
@@ -246,16 +248,17 @@ class TopicDeletionManager(config: KafkaConfig,
   }
 
   private def completeDeleteTopic(topic: String): Unit = {
-    //1. 注销分区变更监听器, 防止删除过程中因数据变更导致的监听器被触发, 引起状态不一致.
+    //1. 注销分区变更监听器, 防止删除过程中因分区数据变更导致的监听器被触发, 引起状态不一致.
     // deregister partition change listener on the deleted topic. This is to prevent the partition change listener
     // firing before the new topic listener when a deleted topic gets auto created
     client.mutePartitionModifications(topic)
-    // 2. 获取 该主题下 状态为 ReplicaDeletionSuccessful 的 replica(已经被成功删除的 replica)
+    // 2. 获取 该主题下 状态为 ReplicaDeletionSuccessful的 所有replica(已经被成功删除的 replica)
     val replicasForDeletedTopic = controllerContext.replicasInState(topic, ReplicaDeletionSuccessful)
-    // 3.controller 从状态机与 分区副本缓存中移除 该 topic.
+    // 3.利用副本状态机将这些副本对象转换为 NonExistentReplica 状态,
+    // 等同于 controller 从副本状态机中移除这些 分区副本.
     // controller will remove this replica from the state machine as well as its partition assignment cache
     replicaStateMachine.handleStateChanges(replicasForDeletedTopic.toSeq, NonExistentReplica)
-    // 4. 移除 zk上关于该主题的一些信息
+    // 4. 移除 zk上关于该主题的一切信息
     client.deleteTopic(topic, controllerContext.epochZkVersion)
     // 5. 移除元数据缓存中关于该主题的一切信息
     controllerContext.removeTopic(topic)
@@ -275,6 +278,7 @@ class TopicDeletionManager(config: KafkaConfig,
       // 获取这些主题的所有分区对象.
       val unseenPartitionsForDeletion = unseenTopicsForDeletion.flatMap(controllerContext.partitionsForTopic)
       // 将这些分区状态依次调整为OfflinePartition and NonExistentPartition
+      // 等同于将这些分区从分区状态机中移除.
       partitionStateMachine.handleStateChanges(unseenPartitionsForDeletion.toSeq, OfflinePartition)
       partitionStateMachine.handleStateChanges(unseenPartitionsForDeletion.toSeq, NonExistentPartition)
       //将主题添加到`已开启删除`主题列表中.
@@ -336,11 +340,11 @@ class TopicDeletionManager(config: KafkaConfig,
   }
 
   private def resumeDeletions(): Unit = {
-    // 从元数据缓存中获取 要删除的主题列表.
+    // 1. 从元数据缓存中获取 要删除的主题列表.
     val topicsQueuedForDeletion = Set.empty[String] ++ controllerContext.topicsToBeDeleted
-    // 待重试主题列表
+    // 2. 待重试主题列表
     val topicsEligibleForRetry = mutable.Set.empty[String]
-    // 待删除主题列表
+    // 3. 待删除主题列表
     val topicsEligibleForDeletion = mutable.Set.empty[String]
 
     if (topicsQueuedForDeletion.nonEmpty)

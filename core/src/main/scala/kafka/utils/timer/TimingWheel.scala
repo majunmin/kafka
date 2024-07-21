@@ -104,6 +104,7 @@ private[timer] class TimingWheel(tickMs: Long, wheelSize: Int, startMs: Long, ta
 
   private[this] var currentTime = startMs - (startMs % tickMs) // rounding down to multiple of tickMs
 
+  // 指向上层溢出的时间轮.
   // overflowWheel can potentially be updated and read by two concurrent threads through add().
   // Therefore, it needs to be volatile due to the issue of Double-Checked Locking pattern with JVM
   @volatile private[this] var overflowWheel: TimingWheel = null
