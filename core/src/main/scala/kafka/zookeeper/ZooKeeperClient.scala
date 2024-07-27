@@ -167,6 +167,7 @@ class ZooKeeperClient(connectString: String,
       val responseQueue = new ArrayBlockingQueue[Req#Response](requests.size)
 
       requests.foreach { request =>
+        // 通过信号量 控制请求的处理速度.
         inFlightRequests.acquire()
         try {
           inReadLock(initializationLock) {

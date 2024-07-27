@@ -603,6 +603,7 @@ class Partition(val topicPartition: TopicPartition,
       if (isNewLeader) {
         // mark local replica as the leader after converting hw
         leaderReplicaIdOpt = Some(localBrokerId)
+        // 重设 remoteReplica 的 一些元数据
         // reset log end offset for remote replicas
         remoteReplicas.foreach { replica =>
           replica.updateFetchState(
@@ -636,6 +637,7 @@ class Partition(val topicPartition: TopicPartition,
       // to maintain the decision maker controller's epoch in the zookeeper path
       controllerEpoch = partitionState.controllerEpoch
 
+      // 保存副本列表(AR)  和 清空ISR
       updateAssignmentAndIsr(
         assignment = partitionState.replicas.asScala.iterator.map(_.toInt).toSeq,
         isr = Set.empty[Int],
@@ -658,6 +660,7 @@ class Partition(val topicPartition: TopicPartition,
         s"offset $leaderEpochEndOffset with high watermark ${followerLog.highWatermark}. " +
         s"Previous leader epoch was $leaderEpoch.")
 
+      // 更新 controller epoch 值
       leaderEpoch = partitionState.leaderEpoch
       leaderEpochStartOffsetOpt = None
       zkVersion = partitionState.zkVersion
@@ -665,6 +668,7 @@ class Partition(val topicPartition: TopicPartition,
       // Since we might have been a leader previously, still clear any pending AlterIsr requests
       alterIsrManager.clearPending(topicPartition)
 
+      // 重设 leader副本的 brokerId
       if (leaderReplicaIdOpt.contains(newLeaderBrokerId) && leaderEpoch == oldLeaderEpoch) {
         false
       } else {

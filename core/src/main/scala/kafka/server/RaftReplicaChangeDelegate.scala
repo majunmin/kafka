@@ -191,6 +191,7 @@ class RaftReplicaChangeDelegate(helper: RaftReplicaChangeDelegateHelper) {
       }
 
       if (partitionsMadeFollower.nonEmpty) {
+        // 1. leader副本可能已经更换, 移除原来的 fetch线程
         helper.replicaFetcherManager.removeFetcherForPartitions(partitionsMadeFollower.map(_.topicPartition))
         helper.stateChangeLogger.info(s"$topLevelLogPrefix: stopped followers for ${partitionsMadeFollower.size} partitions")
 

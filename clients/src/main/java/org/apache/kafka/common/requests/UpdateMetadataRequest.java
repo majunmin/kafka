@@ -66,7 +66,7 @@ public class UpdateMetadataRequest extends AbstractControlRequest {
                             throw new UnsupportedVersionException("UpdateMetadataRequest v0 requires a single endpoint");
                         if (broker.endpoints().get(0).securityProtocol() != SecurityProtocol.PLAINTEXT.id)
                             throw new UnsupportedVersionException("UpdateMetadataRequest v0 only handles PLAINTEXT endpoints");
-                        // Don't null out `endpoints` since it's ignored by the generated code if version >= 1
+                        // Don't null out `endpoints` since it's· ignored by the generated code if version >= 1
                         UpdateMetadataEndpoint endpoint = broker.endpoints().get(0);
                         broker.setV0Host(endpoint.host());
                         broker.setV0Port(endpoint.port());

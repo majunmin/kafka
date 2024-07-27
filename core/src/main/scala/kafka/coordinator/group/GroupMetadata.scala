@@ -233,6 +233,7 @@ private[group] class GroupMetadata(val groupId: String, initialState: GroupState
 
   def inLock[T](fun: => T): T = CoreUtils.inLock(lock)(fun)
 
+  // 判断消费者组是否是给定状态
   def is(groupState: GroupState) = state == groupState
 
   def not(groupState: GroupState) = state != groupState
@@ -430,9 +431,12 @@ private[group] class GroupMetadata(val groupId: String, initialState: GroupState
 
   def canRebalance = PreparingRebalance.validPreviousStates.contains(state)
 
+  // 设置|更新状态
   def transitionTo(groupState: GroupState): Unit = {
     assertValidTransition(groupState)
+    // 修改当前状态为 目标state
     state = groupState
+    // 更新状态变更时间戳
     currentStateTimestamp = Some(time.milliseconds())
   }
 
@@ -606,8 +610,9 @@ private[group] class GroupMetadata(val groupId: String, initialState: GroupState
       if (offsetWithCommitRecordMetadata.appendedBatchOffset.isEmpty)
         throw new IllegalStateException("Cannot complete offset commit write without providing the metadata of the record " +
           "in the log.")
-      // 当 offsets 中不包含 提交的主题分区 || 提交的主题分区的位移 > offsets中保存的  位移.
-      // 那么 将对应的提交位移消息加入到 offsets 中.
+      // 当 offsets 中不包含 提交的主题分区 ||
+      // offsets 中该主题分区对应的位移小子在位移主题中的位移值 < 待写入的位移值
+      // 那将对应的提交位移消息加入到 offsets 中.
       if (!offsets.contains(topicPartition) || offsets(topicPartition).olderThan(offsetWithCommitRecordMetadata))
         offsets.put(topicPartition, offsetWithCommitRecordMetadata)
     }
@@ -735,6 +740,10 @@ private[group] class GroupMetadata(val groupId: String, initialState: GroupState
     // 获取分区的过期位移
     def getExpiredOffsets(baseTimestamp: CommitRecordMetadataAndOffset => Long,
                           subscribedTopics: Set[String] = Set.empty): Map[TopicPartition, OffsetAndMetadata] = {
+      // 1. 遍历 offsets 中所有的分区 过滤出满足以下三个条件的 分区
+      // - 分区所属主题不在订阅主题列表中
+      // - 该主题分区已经完成位移提交
+      // - 该主题分区在位移主题中对应的消息的存在时间超过了 阈值.
       offsets.filter {
         case (topicPartition, commitRecordMetadataAndOffset) =>
           !subscribedTopics.contains(topicPartition.topic()) &&

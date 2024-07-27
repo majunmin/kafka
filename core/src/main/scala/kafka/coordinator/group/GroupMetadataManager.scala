@@ -71,6 +71,8 @@ class GroupMetadataManager(brokerId: Int,
   private val partitionLock = new ReentrantLock()
 
   // 主题下正在执行加载的分区.
+  // 这些分区都是位移主题分区  也就是`__consumer_offsets`主题下的分区.
+  // 所谓加载就是读取位移主题消息数据 填充到GroupMetadataCache 中的字段.
   /* partitions of consumer groups that are being loaded, its lock should be always called BEFORE the group lock if needed */
   private val loadingPartitions: mutable.Set[Int] = mutable.Set()
 
@@ -357,7 +359,9 @@ class GroupMetadataManager(brokerId: Int,
                    offsetMetadata: immutable.Map[TopicPartition, OffsetAndMetadata],
                     // 位移保存完成后的回调
                    responseCallback: immutable.Map[TopicPartition, Errors] => Unit,
+                  // 事务型 producerID
                    producerId: Long = RecordBatch.NO_PRODUCER_ID,
+                  // 事务型 producer epoch
                    producerEpoch: Short = RecordBatch.NO_PRODUCER_EPOCH): Unit = {
     // 过滤出满足条件的带保存的位移数据.
     // first filter out partitions with offset metadata size exceeding limit
@@ -514,6 +518,7 @@ class GroupMetadataManager(brokerId: Int,
   def getOffsets(groupId: String, requireStable: Boolean, topicPartitionsOpt: Option[Seq[TopicPartition]]): Map[TopicPartition, PartitionData] = {
     trace("Getting offsets of %s for group %s.".format(topicPartitionsOpt.getOrElse("all partitions"), groupId))
     val group = groupMetadataCache.get(groupId)
+    // 如果没有组数据. 返回空数据
     if (group == null) {
       topicPartitionsOpt.getOrElse(Seq.empty[TopicPartition]).map { topicPartition =>
         val partitionData = new PartitionData(OffsetFetchResponse.INVALID_OFFSET,
@@ -522,6 +527,7 @@ class GroupMetadataManager(brokerId: Int,
       }.toMap
     } else {
       group.inLock {
+        // 如果组处于 Dead状态. 返回空数据
         if (group.is(Dead)) {
           topicPartitionsOpt.getOrElse(Seq.empty[TopicPartition]).map { topicPartition =>
             val partitionData = new PartitionData(OffsetFetchResponse.INVALID_OFFSET,
@@ -537,6 +543,7 @@ class GroupMetadataManager(brokerId: Int,
                 Optional.empty(), "", Errors.UNSTABLE_OFFSET_COMMIT)
             } else {
               val partitionData = group.offset(topicPartition) match {
+                // 如果组没有位移数据. 返回空数据
                 case None =>
                   new PartitionData(OffsetFetchResponse.INVALID_OFFSET,
                     Optional.empty(), "", Errors.NONE)
@@ -797,14 +804,19 @@ class GroupMetadataManager(brokerId: Int,
 
       debug(s"Started unloading offsets and group metadata for $topicPartition")
       inLock(partitionLock) {
+        // 移除 ownedPartitions 中特定位移主题分区记录.
         // we need to guard the group removal in cache in the loading partition lock
         // to prevent coordinator's check-and-get-group race condition
         ownedPartitions.remove(offsetsPartition)
 
         for (group <- groupMetadataCache.values) {
+          // 如果该组信息保存在特定位移主题分区中.
           if (partitionFor(group.groupId) == offsetsPartition) {
+            // 执行组卸载逻辑
             onGroupUnloaded(group)
+            // 将组信息从 groupMetadataCache 中移除.
             groupMetadataCache.remove(group.groupId, group)
+            // 将消费者组从 producer对应的组集合中移除 (kafka事务用到)
             removeGroupFromAllProducers(group.groupId)
             numGroupsRemoved += 1
             numOffsetsRemoved += group.numOffsets
